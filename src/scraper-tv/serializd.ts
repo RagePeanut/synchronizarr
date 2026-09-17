@@ -9,39 +9,17 @@ import { SeriesScraper } from './scraper.interface';
 
 const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
 
-/**
- * Raw item shape returned by the various Serializd list endpoints.
- *
- * The field names vary between endpoints and between entry kinds (a whole-show
- * entry vs. a season-scoped entry), so this is intentionally loose: `mapItem`
- * probes many known aliases and also looks inside a nested show object.
- */
+/** Raw item shape returned by the various Serializd list endpoints. */
 interface SerializdItem {
-    // TMDB show id, under any of these aliases seen across endpoints.
     showId?: number;
     show_id?: number;
-    showTmdbId?: number;
-    show_tmdb_id?: number;
-    tmdbId?: number;
-    tmdb_id?: number;
-    mediaId?: number;
-    media_id?: number;
-    id?: number;
-    // Some entries nest the show under an object.
-    show?: SerializdItem;
-    media?: SerializdItem;
-    tvShow?: SerializdItem;
-    // Names / titles.
     showName?: string;
     show_name?: string;
     name?: string;
     title?: string;
-    // Season identifiers.
     seasonIds?: number[];
     season_ids?: number[];
     seasonId?: number;
-    season_id?: number;
-    [key: string]: unknown;
 }
 
 interface WatchlistPage {
@@ -132,53 +110,19 @@ export class SerializdScraper implements SeriesScraper {
     }
 
     /**
-     * Serializd's show id is the show's TMDB id. The field name varies between
-     * endpoints/entry kinds, so probe every known alias (and a nested show
-     * object) rather than assuming `showId`. Season ids are Serializd's own
+     * Serializd's `showId` is the show's TMDB id. Season ids are Serializd's own
      * internal ids and must be resolved to TMDB season numbers separately.
      */
     private normaliseItem(raw: SerializdItem): NormalisedItem | null {
-        // A season-scoped entry may nest the show under one of these.
-        const nested = raw.show ?? raw.media ?? raw.tvShow;
+        const tmdbId = raw.showId ?? raw.show_id;
+        if (!tmdbId) return null;
 
-        const tmdbId = this.firstId([
-            raw.showId, raw.show_id, raw.showTmdbId, raw.show_tmdb_id,
-            raw.tmdbId, raw.tmdb_id, raw.mediaId, raw.media_id,
-            // Nested object aliases.
-            nested?.showId, nested?.show_id, nested?.tmdbId, nested?.tmdb_id, nested?.id,
-            // Least specific last: some list endpoints put the TMDB id directly on `id`.
-            raw.id,
-        ]);
-
-        if (tmdbId === undefined) {
-            // Surface the unrecognised shape so a missing entry can be diagnosed
-            // without needing to reproduce it — e.g. a show like Taskmaster that
-            // uses a field name we don't yet handle.
-            logger.warn(`Serializd: could not extract a TMDB id from a list entry; skipping. Raw keys: [${Object.keys(raw).join(', ')}]`);
-            logger.debug('Serializd: unrecognised entry:', JSON.stringify(raw));
-            return null;
-        }
-
-        const seasonIds =
-            raw.seasonIds ?? raw.season_ids ??
-            nested?.seasonIds ?? nested?.season_ids ??
-            (raw.seasonId != null ? [raw.seasonId] : raw.season_id != null ? [raw.season_id] : []);
-
+        const seasonIds = raw.seasonIds ?? raw.season_ids ?? (raw.seasonId != null ? [raw.seasonId] : []);
         return {
             tmdbId,
-            name: raw.showName ?? raw.show_name ?? raw.name ?? raw.title
-                ?? nested?.showName ?? nested?.show_name ?? nested?.name ?? nested?.title
-                ?? 'Unknown',
+            name: raw.showName ?? raw.show_name ?? raw.name ?? raw.title ?? 'Unknown',
             seasonIds,
         };
-    }
-
-    /** Return the first entry that is a positive integer id, else undefined. */
-    private firstId(candidates: Array<number | undefined>): number | undefined {
-        for (const c of candidates) {
-            if (typeof c === 'number' && Number.isInteger(c) && c > 0) return c;
-        }
-        return undefined;
     }
 
     private async resolveSeasons(tmdbId: number, seasonIds: number[]): Promise<number[]> {
