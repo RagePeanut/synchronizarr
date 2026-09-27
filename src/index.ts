@@ -1,10 +1,10 @@
 require('dotenv').config();
 require('dotenv').config();
 
-import env, { isRadarrEnabled, isSonarrEnabled } from './util/env';
+import env, { isRadarrEnabled, isSonarrEnabled, isPlexEnabled } from './util/env';
 import logger from './util/logger';
-import { fetchMoviesFromUrl } from './scraper';
-import { fetchSeriesFromUrl } from './scraper-tv';
+import { fetchMoviesFromUrl, LetterboxdMovie } from './scraper';
+import { fetchSeriesFromUrl, SerializdSeries } from './scraper-tv';
 import { upsertMovies, getAllRequiredTagIds, getMoviesByTagIds, deleteMovie, getExcludedTagIds, removeTagsFromMovie } from './api/radarr';
 import {
   upsertSeries,
@@ -14,6 +14,7 @@ import {
   getExcludedTagIds as getExcludedSeriesTagIds,
   removeTagsFromSeries,
 } from './api/sonarr';
+import { labelMovie, unlabelMovie, labelSeries, unlabelSeries } from './api/plex';
 
 function startScheduledMonitoring(): void {
   const intervalMs = env.CHECK_INTERVAL_MINUTES * 60 * 1000;
@@ -51,6 +52,10 @@ async function runMovies() {
     const movies = await fetchMoviesFromUrl(env.LETTERBOXD_URL!);
     await upsertMovies(movies);
 
+    if (isPlexEnabled()) {
+      await labelMoviesInPlex(movies);
+    }
+
     if (env.SYNC_MODE === 'sync') {
       await syncMovieRemovals(movies.map(m => m.tmdbId ? parseInt(m.tmdbId) : null).filter((id): id is number => id !== null));
     }
@@ -65,11 +70,37 @@ async function runSeries() {
     const series = await fetchSeriesFromUrl(env.SERIALIZD_URL!);
     await upsertSeries(series);
 
+    if (isPlexEnabled()) {
+      await labelSeriesInPlex(series);
+    }
+
     if (env.SYNC_MODE === 'sync') {
       await syncSeriesRemovals(series.map(s => s.tmdbId));
     }
   } catch (error) {
     logger.error('Error during Serializd → Sonarr run:', error);
+  }
+}
+
+/**
+ * Mirror the configured Plex movie labels onto each movie currently on the
+ * list. Runs regardless of SYNC_MODE. Matching is by TMDB (and IMDB) id, so a
+ * movie that isn't scanned into Plex yet is simply skipped and picked up on a
+ * later run.
+ */
+async function labelMoviesInPlex(movies: LetterboxdMovie[]): Promise<void> {
+  for (const movie of movies) {
+    const tmdbId = movie.tmdbId ? parseInt(movie.tmdbId) : null;
+    if (!tmdbId) continue;
+    await labelMovie({ tmdbId, imdbId: movie.imdbId ?? null }, movie.name);
+  }
+}
+
+/** Mirror the configured Plex TV labels onto each series currently on the list. */
+async function labelSeriesInPlex(series: SerializdSeries[]): Promise<void> {
+  for (const s of series) {
+    if (!s.tmdbId) continue;
+    await labelSeries({ tmdbId: s.tmdbId }, s.name);
   }
 }
 
@@ -142,6 +173,14 @@ async function syncMovieRemovals(currentTmdbIds: number[]): Promise<void> {
         logger.error(`Error removing "${movie.title}" (ID: ${movie.id}):`, error);
       }
     }
+
+    // Mirror the removal in Plex: strip this list's labels from every movie that
+    // left the list (protected or not). Plex items and excluded labels are kept.
+    if (isPlexEnabled()) {
+      for (const movie of candidates) {
+        await unlabelMovie({ tmdbId: movie.tmdbId }, movie.title);
+      }
+    }
   } catch (error) {
     logger.error('Error during movie removal sync:', error);
   }
@@ -208,6 +247,14 @@ async function syncSeriesRemovals(currentTmdbIds: number[]): Promise<void> {
         logger.info(`Removed from Sonarr: "${series.title}" (TMDB: ${series.tmdbId}, files ${env.DELETE_FILES ? 'deleted' : 'kept'})`);
       } catch (error) {
         logger.error(`Error removing "${series.title}" (ID: ${series.id}):`, error);
+      }
+    }
+
+    // Mirror the removal in Plex: strip this list's labels from every series that
+    // left the list (protected or not). Plex items and excluded labels are kept.
+    if (isPlexEnabled()) {
+      for (const series of candidates) {
+        await unlabelSeries({ tmdbId: series.tmdbId }, series.title);
       }
     }
   } catch (error) {

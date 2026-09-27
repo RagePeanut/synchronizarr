@@ -33,6 +33,24 @@ const envSchema = z.object({
   // Serializd list entries that pin specific seasons always take precedence.
   SONARR_MONITOR_SEASONS: z.string().optional(),
 
+  // ── Plex labels (optional, applies to BOTH pipelines) ──
+  // When PLEX_URL and PLEX_TOKEN are set, synced items are also labelled in
+  // Plex, mirroring the tags applied in Radarr/Sonarr. This is entirely opt-in:
+  // with these unset, nothing touches Plex. Plex is never used to add or remove
+  // media — only to add/remove labels on items already in your library.
+  PLEX_URL: z.string().url().optional(),
+  PLEX_TOKEN: z.string().optional(),
+  // Plex library section names to search. When unset, movie/show libraries are
+  // auto-detected. Set these when you have multiple libraries of a given type.
+  PLEX_MOVIE_LIBRARY: z.string().optional(),
+  PLEX_TV_LIBRARY: z.string().optional(),
+  // Override the labels applied in Plex (comma-separated). When unset, Plex
+  // labels default to the same custom tags configured for Radarr/Sonarr
+  // (RADARR_TAGS / SONARR_TAGS). Unlike Radarr/Sonarr, the 'letterboxd' /
+  // 'serializd' default tag is NOT applied to Plex labels.
+  PLEX_MOVIE_TAGS: z.string().optional(),
+  PLEX_TV_TAGS: z.string().optional(),
+
   CHECK_INTERVAL_MINUTES: z.string().default('10').transform(Number).pipe(z.number().min(10)),
   LETTERBOXD_TAKE_AMOUNT: z.string().optional().transform(val => val ? Number(val) : undefined).pipe(z.number().positive().optional()),
   LETTERBOXD_TAKE_STRATEGY: z.enum(['oldest', 'newest']).optional(),
@@ -90,6 +108,18 @@ const envSchema = z.object({
     });
   }
 
+  // Plex labelling requires both the URL and a token when either is provided.
+  const plexFields = [data.PLEX_URL, data.PLEX_TOKEN];
+  const plexProvided = plexFields.some(v => v !== undefined);
+  const plexComplete = plexFields.every(v => v !== undefined);
+  if (plexProvided && !plexComplete) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Plex labelling requires both PLEX_URL and PLEX_TOKEN to be set',
+      path: ['PLEX_URL'],
+    });
+  }
+
   // At least one complete pipeline must be configured.
   if (!radarrComplete && !sonarrComplete) {
     ctx.addIssue({
@@ -126,3 +156,10 @@ export const isRadarrEnabled = (): boolean =>
 /** True when the Serializd → Sonarr pipeline is fully configured. */
 export const isSonarrEnabled = (): boolean =>
   !!(env.SERIALIZD_URL && env.SONARR_API_URL && env.SONARR_API_KEY && env.SONARR_QUALITY_PROFILE);
+
+/**
+ * True when Plex labelling is configured. Opt-in: setting PLEX_URL + PLEX_TOKEN
+ * enables labelling synced items in Plex. Plex is only ever used to add/remove
+ * labels — never to add or remove media.
+ */
+export const isPlexEnabled = (): boolean => !!(env.PLEX_URL && env.PLEX_TOKEN);
