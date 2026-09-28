@@ -49,6 +49,7 @@ import {
   labelMovie,
   unlabelMovie,
   labelSeries,
+  unlabelSeries,
   __resetSectionCaches,
 } from './plex';
 
@@ -260,6 +261,222 @@ describe('plex API', () => {
       expect(mockAxiosInstance.get).toHaveBeenNthCalledWith(2, '/library/sections/2/all', expect.anything());
       const url = mockAxiosInstance.put.mock.calls[0][0] as string;
       expect(url).toContain('label%5B0%5D.tag.tag=tv-watchlist');
+    });
+
+    it('matches a show by tvdb guid (tmdb absent)', async () => {
+      mockEnv.SONARR_TAGS = 'tv-watchlist';
+      mockAxiosInstance.get
+        .mockResolvedValueOnce(sectionsResponse([{ key: '2', type: 'show', title: 'TV Shows' }]))
+        .mockResolvedValueOnce(itemsResponse([
+          { ratingKey: '80', title: 'Show', type: 'show', Guid: [{ id: 'tvdb://12345' }], Label: [] },
+        ]));
+      mockAxiosInstance.put.mockResolvedValue({});
+
+      await labelSeries({ tvdbId: 12345 }, 'Show');
+
+      expect(mockAxiosInstance.put).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('unlabelSeries', () => {
+    it('removes the list label from a matching series', async () => {
+      mockEnv.SONARR_TAGS = 'tv-watchlist';
+      mockAxiosInstance.get
+        .mockResolvedValueOnce(sectionsResponse([{ key: '2', type: 'show', title: 'TV Shows' }]))
+        .mockResolvedValueOnce(itemsResponse([
+          { ratingKey: '80', title: 'Show', type: 'show', Guid: [{ id: 'tmdb://5' }], Label: [{ tag: 'tv-watchlist' }] },
+        ]));
+      mockAxiosInstance.put.mockResolvedValue({});
+
+      await unlabelSeries({ tmdbId: 5 }, 'Show');
+
+      const url = mockAxiosInstance.put.mock.calls[0][0] as string;
+      // Full clear: field emptied because the only label was removed.
+      expect(url).toContain('label%5B0%5D.tag.tag=');
+      expect(url).toContain('label.locked=1');
+    });
+  });
+
+  // ── Edge / error branch coverage ──
+
+  describe('early returns', () => {
+    it('labelMovie does nothing when no labels are configured', async () => {
+      mockEnv.RADARR_TAGS = undefined;
+      await labelMovie({ tmdbId: 1 }, 'X');
+      expect(mockAxiosInstance.get).not.toHaveBeenCalled();
+    });
+
+    it('unlabelMovie does nothing when no removable labels remain', async () => {
+      mockEnv.RADARR_TAGS = 'collection';
+      mockEnv.EXCLUDE_TAGS = 'collection'; // the only label is excluded → nothing removable
+      await unlabelMovie({ tmdbId: 1 }, 'X');
+      expect(mockAxiosInstance.get).not.toHaveBeenCalled();
+    });
+
+    it('labelSeries does nothing when no labels are configured', async () => {
+      mockEnv.SONARR_TAGS = undefined;
+      await labelSeries({ tmdbId: 1 }, 'X');
+      expect(mockAxiosInstance.get).not.toHaveBeenCalled();
+    });
+
+    it('unlabelSeries does nothing when no removable labels remain', async () => {
+      mockEnv.SONARR_TAGS = undefined;
+      await unlabelSeries({ tmdbId: 1 }, 'X');
+      expect(mockAxiosInstance.get).not.toHaveBeenCalled();
+    });
+
+    it('returns early when there are no matching sections', async () => {
+      mockEnv.RADARR_TAGS = 'watchlist';
+      // Only a show library exists → no movie sections resolved.
+      mockAxiosInstance.get.mockResolvedValueOnce(sectionsResponse([{ key: '9', type: 'show', title: 'TV' }]));
+      await labelMovie({ tmdbId: 1 }, 'X');
+      // Section lookup happened once; no item query / PUT.
+      expect(mockAxiosInstance.get).toHaveBeenCalledTimes(1);
+      expect(mockAxiosInstance.put).not.toHaveBeenCalled();
+    });
+
+    it('labelSeries returns early when there are no matching sections', async () => {
+      mockEnv.SONARR_TAGS = 'tv-watchlist';
+      mockAxiosInstance.get.mockResolvedValueOnce(sectionsResponse([{ key: '1', type: 'movie', title: 'Movies' }]));
+      await labelSeries({ tmdbId: 1 }, 'X');
+      expect(mockAxiosInstance.put).not.toHaveBeenCalled();
+    });
+
+    it('unlabelSeries returns early when there are no matching sections', async () => {
+      mockEnv.SONARR_TAGS = 'tv-watchlist';
+      mockAxiosInstance.get.mockResolvedValueOnce(sectionsResponse([{ key: '1', type: 'movie', title: 'Movies' }]));
+      await unlabelSeries({ tmdbId: 1 }, 'X');
+      expect(mockAxiosInstance.put).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('section resolution edge cases', () => {
+    it('returns [] and warns when a configured library is not found', async () => {
+      mockEnv.PLEX_MOVIE_LIBRARY = 'Nonexistent';
+      mockEnv.RADARR_TAGS = 'watchlist';
+      mockAxiosInstance.get.mockResolvedValueOnce(sectionsResponse([{ key: '1', type: 'movie', title: 'Movies' }]));
+      await labelMovie({ tmdbId: 1 }, 'X');
+      expect(mockAxiosInstance.put).not.toHaveBeenCalled();
+    });
+
+    it('warns when auto-detect finds no libraries of the type', async () => {
+      mockEnv.RADARR_TAGS = 'watchlist';
+      mockAxiosInstance.get.mockResolvedValueOnce(sectionsResponse([]));
+      await labelMovie({ tmdbId: 1 }, 'X');
+      expect(mockAxiosInstance.put).not.toHaveBeenCalled();
+    });
+
+    it('returns [] when fetching sections throws', async () => {
+      mockEnv.RADARR_TAGS = 'watchlist';
+      mockAxiosInstance.get.mockRejectedValueOnce(new Error('network'));
+      await labelMovie({ tmdbId: 1 }, 'X');
+      expect(mockAxiosInstance.put).not.toHaveBeenCalled();
+    });
+
+    it('handles a missing Directory list in the sections response', async () => {
+      mockEnv.RADARR_TAGS = 'watchlist';
+      mockAxiosInstance.get.mockResolvedValueOnce({ data: { MediaContainer: {} } });
+      await labelMovie({ tmdbId: 1 }, 'X');
+      expect(mockAxiosInstance.put).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('findItem edge cases', () => {
+    it('treats a non-array Metadata as no items', async () => {
+      mockEnv.RADARR_TAGS = 'watchlist';
+      mockAxiosInstance.get
+        .mockResolvedValueOnce(sectionsResponse([{ key: '1', type: 'movie', title: 'Movies' }]))
+        .mockResolvedValueOnce({ data: { MediaContainer: {} } });
+      await labelMovie({ tmdbId: 603 }, 'X');
+      expect(mockAxiosInstance.put).not.toHaveBeenCalled();
+    });
+
+    it('continues past a section query error and finds the item in the next section', async () => {
+      mockEnv.RADARR_TAGS = 'watchlist';
+      mockAxiosInstance.get
+        .mockResolvedValueOnce(sectionsResponse([
+          { key: '1', type: 'movie', title: 'A' },
+          { key: '2', type: 'movie', title: 'B' },
+        ]))
+        .mockRejectedValueOnce(new Error('boom')) // section 1 query fails
+        .mockResolvedValueOnce(itemsResponse([
+          { ratingKey: '5', title: 'M', type: 'movie', Guid: [{ id: 'tmdb://603' }], Label: [] },
+        ]));
+      mockAxiosInstance.put.mockResolvedValue({});
+      await labelMovie({ tmdbId: 603 }, 'M');
+      expect(mockAxiosInstance.put).toHaveBeenCalledTimes(1);
+    });
+
+    it('ignores guids with no id and non-matching ids', async () => {
+      mockEnv.RADARR_TAGS = 'watchlist';
+      mockAxiosInstance.get
+        .mockResolvedValueOnce(sectionsResponse([{ key: '1', type: 'movie', title: 'Movies' }]))
+        .mockResolvedValueOnce(itemsResponse([
+          { ratingKey: '5', title: 'M', type: 'movie', Guid: [{}, { id: 'imdb://tt999' }], Label: [] },
+        ]));
+      // Match by imdb only.
+      mockAxiosInstance.put.mockResolvedValue({});
+      await labelMovie({ tmdbId: 603, imdbId: 'tt999' }, 'M');
+      expect(mockAxiosInstance.put).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('write error handling', () => {
+    it('logs but does not throw when the label PUT fails (add)', async () => {
+      mockEnv.RADARR_TAGS = 'watchlist';
+      mockAxiosInstance.get
+        .mockResolvedValueOnce(sectionsResponse([{ key: '1', type: 'movie', title: 'Movies' }]))
+        .mockResolvedValueOnce(itemsResponse([
+          { ratingKey: '5', title: 'M', type: 'movie', Guid: [{ id: 'tmdb://603' }], Label: [] },
+        ]));
+      mockAxiosInstance.put.mockRejectedValue(new Error('put failed'));
+      await expect(labelMovie({ tmdbId: 603 }, 'M')).resolves.toBeUndefined();
+    });
+
+    it('logs but does not throw when the label PUT fails (remove)', async () => {
+      mockEnv.RADARR_TAGS = 'watchlist';
+      mockAxiosInstance.get
+        .mockResolvedValueOnce(sectionsResponse([{ key: '1', type: 'movie', title: 'Movies' }]))
+        .mockResolvedValueOnce(itemsResponse([
+          { ratingKey: '5', title: 'M', type: 'movie', Guid: [{ id: 'tmdb://603' }], Label: [{ tag: 'watchlist' }] },
+        ]));
+      mockAxiosInstance.put.mockRejectedValue(new Error('put failed'));
+      await expect(unlabelMovie({ tmdbId: 603 }, 'M')).resolves.toBeUndefined();
+    });
+
+    it('unlabelMovie skips silently when the item is not found', async () => {
+      mockEnv.RADARR_TAGS = 'watchlist';
+      mockAxiosInstance.get
+        .mockResolvedValueOnce(sectionsResponse([{ key: '1', type: 'movie', title: 'Movies' }]))
+        .mockResolvedValueOnce(itemsResponse([]));
+      await unlabelMovie({ tmdbId: 603 }, 'M');
+      expect(mockAxiosInstance.put).not.toHaveBeenCalled();
+    });
+
+    it('unlabelMovie respects DRY_RUN (no PUT)', async () => {
+      mockEnv.RADARR_TAGS = 'watchlist';
+      mockEnv.DRY_RUN = true;
+      mockAxiosInstance.get
+        .mockResolvedValueOnce(sectionsResponse([{ key: '1', type: 'movie', title: 'Movies' }]))
+        .mockResolvedValueOnce(itemsResponse([
+          { ratingKey: '5', title: 'M', type: 'movie', Guid: [{ id: 'tmdb://603' }], Label: [{ tag: 'watchlist' }] },
+        ]));
+      await unlabelMovie({ tmdbId: 603 }, 'M');
+      expect(mockAxiosInstance.put).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('section cache', () => {
+    it('resolves sections once and reuses them across calls', async () => {
+      mockEnv.RADARR_TAGS = 'watchlist';
+      mockAxiosInstance.get
+        .mockResolvedValueOnce(sectionsResponse([{ key: '1', type: 'movie', title: 'Movies' }]))
+        .mockResolvedValue(itemsResponse([])); // subsequent item queries
+      await labelMovie({ tmdbId: 1 }, 'A');
+      await labelMovie({ tmdbId: 2 }, 'B');
+      // /library/sections fetched only once (call 1); calls 2 & 3 are item queries.
+      const sectionCalls = mockAxiosInstance.get.mock.calls.filter(c => c[0] === '/library/sections');
+      expect(sectionCalls).toHaveLength(1);
     });
   });
 });
