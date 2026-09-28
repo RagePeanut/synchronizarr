@@ -1,13 +1,14 @@
 // Mutable mock state, read lazily by the env mock factory. All names are
 // mock-prefixed so Jest allows referencing them from the hoisted jest.mock().
 const mockEnv: any = {};
-const mockFlags = { radarr: true, sonarr: false };
+const mockFlags = { radarr: true, sonarr: false, plex: false };
 
 jest.mock('./util/env', () => ({
   __esModule: true,
   default: mockEnv,
   isRadarrEnabled: () => mockFlags.radarr,
   isSonarrEnabled: () => mockFlags.sonarr,
+  isPlexEnabled: () => mockFlags.plex,
 }));
 jest.mock('./util/logger', () => ({
   debug: jest.fn(),
@@ -19,11 +20,13 @@ jest.mock('./scraper');
 jest.mock('./scraper-tv');
 jest.mock('./api/radarr');
 jest.mock('./api/sonarr');
+jest.mock('./api/plex');
 
 import * as scraperModule from './scraper';
 import * as scraperTvModule from './scraper-tv';
 import * as radarrModule from './api/radarr';
 import * as sonarrModule from './api/sonarr';
+import * as plexModule from './api/plex';
 import {
   main,
   startScheduledMonitoring,
@@ -48,6 +51,7 @@ const resetEnv = () => {
   });
   mockFlags.radarr = true;
   mockFlags.sonarr = false;
+  mockFlags.plex = false;
 };
 
 // Seed before any test constructs run.
@@ -199,6 +203,37 @@ describe('main application', () => {
       (scraperModule.fetchMoviesFromUrl as jest.Mock).mockRejectedValue(new Error('boom'));
       await expect(runMovies()).resolves.toBeUndefined();
     });
+
+    it('labels movies in Plex (by tmdb id) when Plex is enabled', async () => {
+      mockEnv.SYNC_MODE = 'add';
+      mockFlags.plex = true;
+      const movies = [
+        { id: 1, name: 'A', slug: '/film/a/', tmdbId: '123', imdbId: 'tt1', publishedYear: null },
+        { id: 2, name: 'B', slug: '/film/b/', tmdbId: null, imdbId: null, publishedYear: null },
+      ];
+      (scraperModule.fetchMoviesFromUrl as jest.Mock).mockResolvedValue(movies);
+      (radarrModule.upsertMovies as jest.Mock).mockResolvedValue(undefined);
+      (plexModule.labelMovie as jest.Mock).mockResolvedValue(undefined);
+
+      await runMovies();
+
+      // Only the movie with a tmdb id is labelled.
+      expect(plexModule.labelMovie).toHaveBeenCalledTimes(1);
+      expect(plexModule.labelMovie).toHaveBeenCalledWith({ tmdbId: 123, imdbId: 'tt1' }, 'A');
+    });
+
+    it('does not touch Plex when Plex is disabled', async () => {
+      mockEnv.SYNC_MODE = 'add';
+      mockFlags.plex = false;
+      (scraperModule.fetchMoviesFromUrl as jest.Mock).mockResolvedValue([
+        { id: 1, name: 'A', slug: '/film/a/', tmdbId: '123', imdbId: null, publishedYear: null },
+      ]);
+      (radarrModule.upsertMovies as jest.Mock).mockResolvedValue(undefined);
+
+      await runMovies();
+
+      expect(plexModule.labelMovie).not.toHaveBeenCalled();
+    });
   });
 
   describe('runSeries', () => {
@@ -262,6 +297,25 @@ describe('main application', () => {
 
       expect(radarrModule.removeTagsFromMovie).toHaveBeenCalledWith(expect.objectContaining({ id: 8 }), [10]);
       expect(radarrModule.deleteMovie).not.toHaveBeenCalled();
+    });
+
+    it('strips Plex labels for every movie that left the list (protected or not) when Plex is enabled', async () => {
+      mockFlags.plex = true;
+      (radarrModule.getAllRequiredTagIds as jest.Mock).mockResolvedValue([10]);
+      (radarrModule.getMoviesByTagIds as jest.Mock).mockResolvedValue([
+        { id: 7, title: 'Gone', tmdbId: 999, tags: [10] },
+        { id: 8, title: 'Keep', tmdbId: 888, tags: [10, 99] },
+      ]);
+      (radarrModule.getExcludedTagIds as jest.Mock).mockResolvedValue([99]);
+      (radarrModule.deleteMovie as jest.Mock).mockResolvedValue(undefined);
+      (radarrModule.removeTagsFromMovie as jest.Mock).mockResolvedValue(undefined);
+      (plexModule.unlabelMovie as jest.Mock).mockResolvedValue(undefined);
+
+      await syncMovieRemovals([123]);
+
+      expect(plexModule.unlabelMovie).toHaveBeenCalledWith({ tmdbId: 999 }, 'Gone');
+      expect(plexModule.unlabelMovie).toHaveBeenCalledWith({ tmdbId: 888 }, 'Keep');
+      expect(plexModule.unlabelMovie).toHaveBeenCalledTimes(2);
     });
 
     it('logs instead of acting in dry-run mode', async () => {

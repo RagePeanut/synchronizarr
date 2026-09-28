@@ -354,6 +354,51 @@ These apply to whichever pipeline(s) you enable:
 | `UPDATE_EXISTING_TAGS` | `false` | When `true`, update tags on items that already exist in Radarr/Sonarr. Required for `SYNC_MODE=sync` to work correctly. When `false` (default), existing items are silently skipped (original upstream behavior) |
 | `EXCLUDE_TAGS` | - | Comma-separated tag names that protect items from **deletion** in sync mode. When an item leaves this list but carries an excluded tag, it is **not deleted** — instead this instance's own tags are stripped from it (the item is kept, owned by whatever gave it the excluded tag). Useful when running multiple sync instances (e.g. a watchlist and a collection) |
 
+### Plex Labels (optional)
+
+When `PLEX_URL` and `PLEX_TOKEN` are set, synced items are also **labelled in Plex**, mirroring the tags applied in Radarr/Sonarr. This lets you build [Plex Smart Collections](https://support.plex.tv/articles/201273953-collections/) driven by those labels, so a film added to your Letterboxd list shows up in the right Plex collection automatically — no manual tagging.
+
+This feature is entirely **opt-in**: leave `PLEX_URL`/`PLEX_TOKEN` unset and nothing touches Plex.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PLEX_URL` | - | Base URL of your Plex server (e.g. `http://localhost:32400`). Setting this + `PLEX_TOKEN` enables Plex labelling |
+| `PLEX_TOKEN` | - | Plex authentication token ([how to find it](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/)) |
+| `PLEX_MOVIE_LIBRARY` | *(auto-detect)* | Plex movie library name to label. When unset, all movie libraries are auto-detected. Set this if you have multiple movie libraries |
+| `PLEX_TV_LIBRARY` | *(auto-detect)* | Plex TV library name to label. When unset, all show libraries are auto-detected |
+| `PLEX_MOVIE_TAGS` | *(= `RADARR_TAGS`)* | Override the labels applied to movies in Plex (comma-separated). Defaults to the same custom tags configured for Radarr |
+| `PLEX_TV_TAGS` | *(= `SONARR_TAGS`)* | Override the labels applied to series in Plex (comma-separated). Defaults to the same custom tags configured for Sonarr |
+
+**How it works:**
+
+- Items are matched in Plex by their **TMDB id** (and IMDB id for movies), so an item that isn't scanned into your Plex library yet is skipped and picked up on a later run once it appears.
+- Unlike Radarr/Sonarr, the `letterboxd` / `serializd` default tag is **not** applied to Plex labels — only your custom tags (or the `PLEX_*_TAGS` overrides). So if `RADARR_TAGS=watchlist`, the Plex label is just `watchlist`.
+- **Plex is never used to add or remove media** — only to add/remove labels. Media deletion stays with Radarr/Sonarr (and any other tooling you use).
+- In `SYNC_MODE=sync`, when an item leaves the list, only **this list's own labels** are removed from the Plex item. Excluded labels (`EXCLUDE_TAGS`) and any other labels you've added in Plex are left untouched, and the item itself is always kept.
+- Respects `DRY_RUN`: label changes are logged but not executed.
+
+**Example — a "Collection" label auto-applied from a Letterboxd list:**
+
+```yaml
+  synchronizarr-collection:
+    build: ./synchronizarr
+    environment:
+      - LETTERBOXD_URL=https://letterboxd.com/your_username/list/digital-collection/
+      - RADARR_API_URL=http://radarr:7878
+      - RADARR_API_KEY=your_api_key
+      - RADARR_QUALITY_PROFILE=Any
+      - RADARR_TAGS=collection          # tags in Radarr AND labels in Plex
+      - SYNC_MODE=sync
+      - UPDATE_EXISTING_TAGS=true
+      - PLEX_URL=http://plex:32400
+      - PLEX_TOKEN=your_plex_token
+      # PLEX_MOVIE_LIBRARY=Movies       # optional; auto-detected when unset
+      # PLEX_MOVIE_TAGS=Collection      # optional; defaults to RADARR_TAGS (collection)
+    restart: unless-stopped
+```
+
+Every film on the list gets a `collection` label in Plex; build a Smart Collection filtered by that label and it stays in sync automatically.
+
 ## Sync Mode (Bidirectional)
 
 When `SYNC_MODE=sync`, the Letterboxd list becomes the **single source of truth** for which movies should be in Radarr (with your configured tags). Each cycle:
