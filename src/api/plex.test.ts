@@ -6,10 +6,13 @@ const mockAxiosInstance = {
 };
 
 jest.mock('axios', () => {
+  const isAxiosError = (e: any) => !!(e && e.isAxiosError);
   return {
     create: jest.fn(() => mockAxiosInstance),
+    isAxiosError,
     default: {
       create: jest.fn(() => mockAxiosInstance),
+      isAxiosError,
     },
   };
 });
@@ -50,8 +53,25 @@ import {
   unlabelMovie,
   labelSeries,
   unlabelSeries,
+  describeError,
   __resetSectionCaches,
 } from './plex';
+
+// Build a fake Axios error shaped like the real thing for describeError tests.
+const axiosError = (opts: {
+  status?: number;
+  statusText?: string;
+  code?: string;
+  method?: string;
+  url?: string;
+  message?: string;
+}) => ({
+  isAxiosError: true,
+  code: opts.code,
+  message: opts.message ?? 'Request failed',
+  config: opts.method || opts.url ? { method: opts.method, url: opts.url } : undefined,
+  response: opts.status ? { status: opts.status, statusText: opts.statusText } : undefined,
+});
 
 // Helpers to build Plex API responses.
 const sectionsResponse = (dirs: Array<{ key: string; type: string; title: string }>) => ({
@@ -477,6 +497,36 @@ describe('plex API', () => {
       // /library/sections fetched only once (call 1); calls 2 & 3 are item queries.
       const sectionCalls = mockAxiosInstance.get.mock.calls.filter(c => c[0] === '/library/sections');
       expect(sectionCalls).toHaveLength(1);
+    });
+  });
+
+  describe('describeError', () => {
+    it('surfaces status + method + url and a token hint for 401', () => {
+      const msg = describeError(axiosError({ status: 401, statusText: 'Unauthorized', method: 'get', url: '/library/sections' }));
+      expect(msg).toContain('HTTP 401 Unauthorized');
+      expect(msg).toContain('on GET /library/sections');
+      expect(msg).toContain('PLEX_TOKEN');
+    });
+
+    it('hints at an unreachable URL for connection errors', () => {
+      expect(describeError(axiosError({ code: 'ECONNREFUSED' }))).toContain('reachable');
+      expect(describeError(axiosError({ code: 'ENOTFOUND' }))).toContain('reachable');
+    });
+
+    it('hints at a timeout', () => {
+      expect(describeError(axiosError({ code: 'ETIMEDOUT' }))).toContain('did not respond');
+    });
+
+    it('hints at a self-signed TLS certificate', () => {
+      expect(describeError(axiosError({ code: 'DEPTH_ZERO_SELF_SIGNED_CERT' }))).toContain('self-signed');
+    });
+
+    it('falls back to the message for a plain Error', () => {
+      expect(describeError(new Error('boom'))).toBe('boom');
+    });
+
+    it('stringifies non-error values', () => {
+      expect(describeError('nope')).toBe('nope');
     });
   });
 });

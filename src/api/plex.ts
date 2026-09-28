@@ -34,6 +34,44 @@ const axios: AxiosInstance = Axios.create({
     },
 });
 
+/**
+ * Turn an unknown thrown value (usually an Axios error) into a concise,
+ * human-readable string. Logging the raw Axios error object tends to produce
+ * unhelpful output (circular references get stripped, the useful fields are
+ * buried), so we surface the bits that actually explain the failure: the HTTP
+ * status, the low-level error code (ECONNREFUSED, ENOTFOUND, ETIMEDOUT, …) and
+ * the request target.
+ */
+export function describeError(error: unknown): string {
+    if (Axios.isAxiosError(error)) {
+        const parts: string[] = [];
+        if (error.response?.status) {
+            parts.push(`HTTP ${error.response.status}${error.response.statusText ? ` ${error.response.statusText}` : ''}`);
+        }
+        if (error.code) parts.push(error.code);
+        const method = error.config?.method?.toUpperCase();
+        const url = error.config?.url;
+        if (method && url) parts.push(`on ${method} ${url}`);
+        parts.push(error.message);
+
+        let hint = '';
+        const status = error.response?.status;
+        if (status === 401 || status === 403) {
+            hint = ' — check PLEX_TOKEN is valid.';
+        } else if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND' || error.code === 'EAI_AGAIN') {
+            hint = ' — check PLEX_URL is reachable from this container (use the Plex host/container name and port, not localhost).';
+        } else if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED') {
+            hint = ' — the Plex server did not respond in time; check PLEX_URL and that Plex is running.';
+        } else if (error.code === 'DEPTH_ZERO_SELF_SIGNED_CERT' || error.code === 'SELF_SIGNED_CERT_IN_CHAIN' || error.code === 'ERR_TLS_CERT_ALTNAME_INVALID') {
+            hint = ' — Plex is using a self-signed TLS certificate; use the plain http:// URL and port (default 32400) instead of https://.';
+        }
+
+        return parts.filter(Boolean).join(' ') + hint;
+    }
+    if (error instanceof Error) return error.message;
+    return String(error);
+}
+
 interface PlexSection {
     key: string;
     type: string;
@@ -124,7 +162,7 @@ async function resolveSectionKeys(
     try {
         sections = await getSections();
     } catch (error) {
-        logger.error('Plex: failed to fetch library sections:', error);
+        logger.error(`Plex: failed to fetch library sections: ${describeError(error)}`);
         return [];
     }
 
@@ -177,7 +215,7 @@ async function findItem(
             const found = items.find(it => itemMatchesIds(it, ids));
             if (found) return { item: found, sectionKey };
         } catch (error) {
-            logger.error(`Plex: failed to query section ${sectionKey}:`, error);
+            logger.error(`Plex: failed to query section ${sectionKey}: ${describeError(error)}`);
         }
     }
     return null;
@@ -261,7 +299,7 @@ async function addLabels(ctx: ApplyContext, ids: PlexMatchIds, labelsToAdd: stri
         await writeLabels(match.sectionKey, ctx.plexType, match.item.ratingKey, desired);
         logger.info(`Plex: labelled "${ctx.displayName}" with [${labelsToAdd.join(', ')}]`);
     } catch (error) {
-        logger.error(`Plex: failed to label "${ctx.displayName}":`, error);
+        logger.error(`Plex: failed to label "${ctx.displayName}": ${describeError(error)}`);
     }
 }
 
@@ -295,7 +333,7 @@ async function stripLabels(ctx: ApplyContext, ids: PlexMatchIds, labelsToRemove:
         await writeLabels(match.sectionKey, ctx.plexType, match.item.ratingKey, remaining);
         logger.info(`Plex: removed labels [${labelsToRemove.join(', ')}] from "${ctx.displayName}" (item kept).`);
     } catch (error) {
-        logger.error(`Plex: failed to remove labels from "${ctx.displayName}":`, error);
+        logger.error(`Plex: failed to remove labels from "${ctx.displayName}": ${describeError(error)}`);
     }
 }
 
